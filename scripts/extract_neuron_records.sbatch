@@ -14,7 +14,6 @@ set -euo pipefail
 
 module load intel/19.1.2 cuda/11.4
 module load python/3.7.1
-conda init >/dev/null
 source activate ${CONDA_ENV:-neuron-explainer}
 
 MODEL_ID=${MODEL_ID:-meta-llama/Meta-Llama-3-8B-Instruct}
