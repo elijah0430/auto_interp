@@ -10,10 +10,11 @@
 #SBATCH --gres=gpu:1
 #SBATCH --time=24:00:00
 
-set -euo pipefail
+set -eo pipefail
 
 module load intel/19.1.2 cuda/11.4
 module load python/3.7.1
+export PS1=${PS1:-"(batch)"}
 source activate ${CONDA_ENV:-neuron-explainer}
 
 MODEL_ID=${MODEL_ID:-meta-llama/Meta-Llama-3-8B-Instruct}
