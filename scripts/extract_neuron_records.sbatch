@@ -18,7 +18,12 @@ export PS1=${PS1:-"(batch)"}
 source activate ${CONDA_ENV:-neuron-explainer}
 cd ${REPO_DIR:-$HOME/automated-interpretability}
 export PYTHONPATH=${PYTHONPATH:-${REPO_DIR:-$HOME/automated-interpretability}}
-python -m pip install -e . >/dev/null
+if [ ! -f neuron-explainer/setup.py ]; then
+  echo "Could not find neuron-explainer/setup.py in $REPO_DIR" >&2
+  exit 1
+fi
+python -m pip install -e neuron-explainer >/dev/null
+
 
 MODEL_ID=${MODEL_ID:-meta-llama/Meta-Llama-3-8B-Instruct}
 TOKENIZER_ID=${TOKENIZER_ID:-$MODEL_ID}
