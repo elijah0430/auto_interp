@@ -341,24 +341,47 @@ class ActivationStats:
 
     def add(self, tokens: Sequence[str], activations: Sequence[float]) -> None:
         activation_list = [float(x) for x in activations]
-        record = ActivationRecord(tokens=list(tokens), activations=activation_list)
         score = max(activation_list) if activation_list else float("-inf")
-        if self.top_k > 0:
+
+        # Decide whether this record will be kept before allocating the dataclass.
+        add_to_heap = False
+        replace_heap_root = False
+        reservoir_index: Optional[int] = None
+
+        if self.top_k > 0 and activation_list:
+            if len(self._top_heap) < self.top_k:
+                add_to_heap = True
+            elif score > self._top_heap[0][0]:
+                add_to_heap = True
+                replace_heap_root = True
+
+        self._seen_records += 1
+        if self.random_sample_size > 0:
+            if len(self._reservoir) < self.random_sample_size:
+                reservoir_index = len(self._reservoir)
+            else:
+                idx = random.randint(0, self._seen_records - 1)
+                if idx < self.random_sample_size:
+                    reservoir_index = idx
+
+        record: Optional[ActivationRecord] = None
+        if add_to_heap or reservoir_index is not None:
+            tokens_ref = tokens if isinstance(tokens, list) else list(tokens)
+            record = ActivationRecord(tokens=tokens_ref, activations=activation_list)
+
+        if add_to_heap and record is not None:
             self._tie_counter += 1
             item = (score, self._tie_counter, record)
             if len(self._top_heap) < self.top_k:
                 heapq.heappush(self._top_heap, item)
-            else:
-                if score > self._top_heap[0][0]:
-                    heapq.heapreplace(self._top_heap, item)
-        self._seen_records += 1
-        if self.random_sample_size > 0:
-            if len(self._reservoir) < self.random_sample_size:
+            elif replace_heap_root:
+                heapq.heapreplace(self._top_heap, item)
+
+        if reservoir_index is not None and record is not None:
+            if reservoir_index == len(self._reservoir):
                 self._reservoir.append(record)
             else:
-                idx = random.randint(0, self._seen_records - 1)
-                if idx < self.random_sample_size:
-                    self._reservoir[idx] = record
+                self._reservoir[reservoir_index] = record
         for value in activation_list:
             self._count += 1
             delta = value - self._mean
