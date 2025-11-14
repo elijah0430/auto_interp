@@ -39,5 +39,7 @@ all of the generation, simulation, and scoring utilities.
 
 Add `--all-layers` to sweep every transformer block in one run, or pass `--layer-indices 0 1 2` to limit processing to a subset.
 
+By default the CLI keeps the top 100 activation records per neuron (ordered strongest to weakest), which downstream tooling interprets in that same rank order.
+
 If you run on a Slurm cluster, `scripts/extract_neuron_records.sbatch` wraps the same command and exposes the key arguments via environment overrides (e.g. `sbatch --export=ALL,MODEL_ID=... scripts/extract_neuron_records.sbatch`). Set `ALL_LAYERS=1` or `LAYER_INDICES="0 1 2"` before submission to mirror the CLI options.
 
