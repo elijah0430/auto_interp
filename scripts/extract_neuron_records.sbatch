@@ -50,46 +50,11 @@ VALUEEVAL_DIR=${VALUEEVAL_DIR:-$HOME/data/valueeval}
 VALUEEVAL_SPLITS=${VALUEEVAL_SPLITS:-"arguments-training.tsv arguments-validation.tsv arguments-validation-zhihu.tsv arguments-test.tsv arguments-test-nahjalbalagha.tsv"}
 VALUEEVAL_TEXT_COLUMN=${VALUEEVAL_TEXT_COLUMN:-Premise}
 EXPECTED_SEQUENCES=${EXPECTED_SEQUENCES:-}
-SHARD_COUNT=${SHARD_COUNT:-1}
-SHARD_INDEX=${SHARD_INDEX:-0}
+SHARD_COUNT=${SHARD_COUNT:-10}
 SHARD_PAD_WIDTH=${SHARD_PAD_WIDTH:-2}
 
-base_output_dir="$OUTPUT_DIR"
-
-if [ "$SHARD_COUNT" -gt 1 ]; then
-  if [ "$SHARD_INDEX" -lt 0 ] || [ "$SHARD_INDEX" -ge "$SHARD_COUNT" ]; then
-    echo "SHARD_INDEX ($SHARD_INDEX) must be within [0, SHARD_COUNT=$SHARD_COUNT)" >&2
-    exit 1
-  fi
-  shard_dir=$(printf "%s/shard_%0${SHARD_PAD_WIDTH}d" "$base_output_dir" "$SHARD_INDEX")
-  OUTPUT_DIR="$shard_dir"
-  DATASET_SPLIT=$(
-    python - "$DATASET_SPLIT" "$SHARD_INDEX" "$SHARD_COUNT" <<'PY'
-import sys
-base, shard_idx, shard_count = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-width = 100.0 / shard_count
-start = shard_idx * width
-end = (shard_idx + 1) * width
-def fmt(value, omit_zero=False, omit_hundred=False):
-    if omit_zero and abs(value) < 1e-9:
-        return ""
-    if omit_hundred and abs(value - 100.0) < 1e-9:
-        return ""
-    if abs(value - round(value)) < 1e-9:
-        return f"{int(round(value))}%"
-    return f"{value:.6f}%".rstrip("0").rstrip(".")
-start_token = fmt(start, omit_zero=True, omit_hundred=False)
-end_token = fmt(end, omit_zero=False, omit_hundred=(shard_idx == shard_count - 1))
-if start_token or end_token:
-    print(f"{base}[{start_token}:{end_token}]")
-else:
-    print(base)
-PY
-  )
-  echo "Shard ${SHARD_INDEX}/${SHARD_COUNT} -> split ${DATASET_SPLIT}, output ${OUTPUT_DIR}"
-fi
-
-mkdir -p "$OUTPUT_DIR"
+BASE_OUTPUT_DIR="$OUTPUT_DIR"
+mkdir -p "$BASE_OUTPUT_DIR"
 
 extra_flags=()
 if [ -n "$DATASET_CONFIG" ]; then
@@ -114,9 +79,6 @@ if [ "$DATASET_NAME" = "valueeval" ]; then
   extra_flags+=(--valueeval-splits)
   extra_flags+=("${valueeval_split_array[@]}")
 fi
-if [ -n "$EXPECTED_SEQUENCES" ]; then
-  extra_flags+=(--expected-sequences "$EXPECTED_SEQUENCES")
-fi
 
 if [ "$ALL_NEURONS" = "1" ]; then
   neuron_flags=(--all-neurons)
@@ -134,18 +96,57 @@ else
   layer_flags=(--layer-index "$LAYER_INDEX")
 fi
 
-srun python -m neuron_explainer.preprocessing.extract_neuron_records \
-  --model "$MODEL_ID" \
-  --dataset "$DATASET_NAME" \
-  --split "$DATASET_SPLIT" \
-  --text-column "$TEXT_COLUMN" \
-  "${layer_flags[@]}" \
-  --sequence-length "$SEQUENCE_LENGTH" \
-  --max-sequences "$MAX_SEQUENCES" \
-  --top-k "$TOP_K" \
-  --random-sample-size "$RANDOM_SAMPLE_SIZE" \
-  --output-dir "$OUTPUT_DIR" \
-  --device "$DEVICE" \
-  --dtype "$DTYPE" \
-  "${neuron_flags[@]}" \
-  "${extra_flags[@]}"
+python - "$DATASET_SPLIT" "$SHARD_COUNT" <<'PY' > /tmp/split_ranges.txt
+import sys
+base = sys.argv[1]
+count = int(sys.argv[2])
+width = 100.0 / count
+def fmt(v, omit_zero=False, omit_hundred=False):
+    if omit_zero and abs(v) < 1e-9:
+        return ""
+    if omit_hundred and abs(v - 100.0) < 1e-9:
+        return ""
+    if abs(v - round(v)) < 1e-9:
+        return f"{int(round(v))}%"
+    return f"{v:.6f}%".rstrip("0").rstrip(".")
+for idx in range(count):
+    start = idx * width
+    end = (idx + 1) * width
+    start_token = fmt(start, omit_zero=True, omit_hundred=False)
+    end_token = fmt(end, omit_zero=False, omit_hundred=(idx == count - 1))
+    split = f"{base}[{start_token}:{end_token}]" if (start_token or end_token) else base
+    print(split)
+PY
+
+mapfile -t SHARD_SPLITS < /tmp/split_ranges.txt
+rm -f /tmp/split_ranges.txt
+
+for shard_idx in "${!SHARD_SPLITS[@]}"; do
+  shard_split="${SHARD_SPLITS[$shard_idx]}"
+  shard_output_dir=$(printf "%s/shard_%0${SHARD_PAD_WIDTH}d" "$BASE_OUTPUT_DIR" "$shard_idx")
+  mkdir -p "$shard_output_dir"
+  shard_extra_flags=("${extra_flags[@]}")
+  if [ -n "$EXPECTED_SEQUENCES" ]; then
+    per_shard=$((EXPECTED_SEQUENCES / SHARD_COUNT))
+    if [ "$shard_idx" -eq "$((SHARD_COUNT - 1))" ]; then
+      per_shard=$((EXPECTED_SEQUENCES - per_shard * (SHARD_COUNT - 1)))
+    fi
+    shard_extra_flags+=(--expected-sequences "$per_shard")
+  fi
+  echo "==== Shard $((shard_idx + 1))/${SHARD_COUNT} | split ${shard_split} | output ${shard_output_dir} ===="
+  srun python -m neuron_explainer.preprocessing.extract_neuron_records \
+    --model "$MODEL_ID" \
+    --dataset "$DATASET_NAME" \
+    --split "$shard_split" \
+    --text-column "$TEXT_COLUMN" \
+    "${layer_flags[@]}" \
+    --sequence-length "$SEQUENCE_LENGTH" \
+    --max-sequences "$MAX_SEQUENCES" \
+    --top-k "$TOP_K" \
+    --random-sample-size "$RANDOM_SAMPLE_SIZE" \
+    --output-dir "$shard_output_dir" \
+    --device "$DEVICE" \
+    --dtype "$DTYPE" \
+    "${neuron_flags[@]}" \
+    "${shard_extra_flags[@]}"
+done
