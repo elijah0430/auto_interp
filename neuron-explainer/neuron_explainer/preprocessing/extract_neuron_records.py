@@ -314,23 +314,27 @@ class ActivationStats:
     random_sample_size: int
 
     def __post_init__(self) -> None:
-        self._top_heap: List[tuple[float, ActivationRecord]] = []
+        # Heap stores (score, tie_breaker, record) so items stay comparable.
+        self._top_heap: List[tuple[float, int, ActivationRecord]] = []
         self._reservoir: List[ActivationRecord] = []
         self._seen_records = 0
         self._count = 0
         self._mean = 0.0
         self._m2 = 0.0
+        self._tie_counter = 0
 
     def add(self, tokens: Sequence[str], activations: Sequence[float]) -> None:
         activation_list = [float(x) for x in activations]
         record = ActivationRecord(tokens=list(tokens), activations=activation_list)
         score = max(activation_list) if activation_list else float("-inf")
         if self.top_k > 0:
+            self._tie_counter += 1
+            item = (score, self._tie_counter, record)
             if len(self._top_heap) < self.top_k:
-                heapq.heappush(self._top_heap, (score, record))
+                heapq.heappush(self._top_heap, item)
             else:
                 if score > self._top_heap[0][0]:
-                    heapq.heapreplace(self._top_heap, (score, record))
+                    heapq.heapreplace(self._top_heap, item)
         self._seen_records += 1
         if self.random_sample_size > 0:
             if len(self._reservoir) < self.random_sample_size:
@@ -357,7 +361,7 @@ class ActivationStats:
         return self._m2 / (self._count - 1)
 
     def top_records(self) -> List[ActivationRecord]:
-        return [record for _, record in sorted(self._top_heap, key=lambda item: item[0], reverse=True)]
+        return [record for _, _, record in sorted(self._top_heap, key=lambda item: item[0], reverse=True)]
 
     def random_records(self) -> List[ActivationRecord]:
         return list(self._reservoir)
