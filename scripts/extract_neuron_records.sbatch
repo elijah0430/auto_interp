@@ -19,7 +19,7 @@ source activate ${CONDA_ENV:-neuron-explainer}
 cd ${REPO_DIR:-$HOME/automated-interpretability}
 export PYTHONPATH=${PYTHONPATH:-${REPO_DIR:-$HOME/automated-interpretability}}
 if [ ! -f neuron-explainer/setup.py ]; then
-  echo "Could not find neuron-explainer/setup.py in $REPO_DIR" >&2
+  echo "Could not find neuron-explainer/setup.py in ${REPO_DIR:-$HOME/automated-interpretability}" >&2
   exit 1
 fi
 python -m pip install -e neuron-explainer >/dev/null
@@ -46,6 +46,9 @@ TRUST_REMOTE_CODE=${TRUST_REMOTE_CODE:-0}
 STREAMING=${STREAMING:-0}
 ALL_NEURONS=${ALL_NEURONS:-0}
 NEURON_INDICES=${NEURON_INDICES:-"42 256"}
+VALUEEVAL_DIR=${VALUEEVAL_DIR:-$HOME/data/valueeval}
+VALUEEVAL_SPLITS=${VALUEEVAL_SPLITS:-"arguments-training.tsv arguments-validation.tsv arguments-validation-zhihu.tsv arguments-test.tsv arguments-test-nahjalbalagha.tsv"}
+VALUEEVAL_TEXT_COLUMN=${VALUEEVAL_TEXT_COLUMN:-Premise}
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -64,6 +67,13 @@ if [ "$STRIDE" != "$SEQUENCE_LENGTH" ]; then
 fi
 if [ -n "$TOKENIZER_ID" ] && [ "$TOKENIZER_ID" != "$MODEL_ID" ]; then
   extra_flags+=(--tokenizer "$TOKENIZER_ID")
+fi
+if [ "$DATASET_NAME" = "valueeval" ]; then
+  extra_flags+=(--valueeval-dir "$VALUEEVAL_DIR")
+  extra_flags+=(--valueeval-text-column "$VALUEEVAL_TEXT_COLUMN")
+  read -r -a valueeval_split_array <<< "$VALUEEVAL_SPLITS"
+  extra_flags+=(--valueeval-splits)
+  extra_flags+=("${valueeval_split_array[@]}")
 fi
 
 if [ "$ALL_NEURONS" = "1" ]; then

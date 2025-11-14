@@ -26,6 +26,7 @@ import argparse
 import heapq
 import math
 import random
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence
@@ -66,7 +67,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset",
         default="openwebtext",
-        help="Dataset name/path passed to datasets.load_dataset (default: openwebtext).",
+        help=(
+            "Dataset name/path passed to datasets.load_dataset (default: openwebtext). "
+            "Set to 'valueeval' to read the Touché23-ValueEval TSV files."
+        ),
     )
     parser.add_argument(
         "--dataset-config",
@@ -77,6 +81,32 @@ def parse_args() -> argparse.Namespace:
         "--split",
         default="train",
         help="Dataset split passed to load_dataset (default: train).",
+    )
+    parser.add_argument(
+        "--valueeval-dir",
+        type=Path,
+        default=Path.home() / "data" / "valueeval",
+        help="Directory containing the Touché23-ValueEval TSV files (used when --dataset valueeval).",
+    )
+    parser.add_argument(
+        "--valueeval-splits",
+        nargs="+",
+        default=[
+            "arguments-training.tsv",
+            "arguments-validation.tsv",
+            "arguments-validation-zhihu.tsv",
+            "arguments-test.tsv",
+            "arguments-test-nahjalbalagha.tsv",
+        ],
+        help=(
+            "List of TSV filenames (relative to --valueeval-dir) to include when --dataset valueeval "
+            "(default: arguments-training/validation/test variants)."
+        ),
+    )
+    parser.add_argument(
+        "--valueeval-text-column",
+        default="Premise",
+        help="Column to read from the ValueEval TSV files when --dataset valueeval (default: Premise).",
     )
     parser.add_argument(
         "--text-column",
@@ -106,8 +136,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--layer-index",
         type=int,
-        required=True,
-        help="Index of the transformer block whose MLP activations should be captured.",
+        help="Index of a single transformer block to capture (legacy flag).",
+    )
+    parser.add_argument(
+        "--layer-indices",
+        type=int,
+        nargs="+",
+        help="Optional list of layer indices to capture.",
+    )
+    parser.add_argument(
+        "--all-layers",
+        action="store_true",
+        help="Capture activations for every transformer block in the model.",
     )
     neuron_group = parser.add_mutually_exclusive_group(required=True)
     neuron_group.add_argument(
@@ -124,7 +164,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--top-k",
         type=int,
-        default=20,
+        default=100,
         help="How many top-activating sequences to keep for each neuron.",
     )
     parser.add_argument(
@@ -193,6 +233,29 @@ def dataset_text_iterator(dataset, text_column: str) -> Iterator[str]:
         text = row.get(text_column) if isinstance(row, dict) else getattr(row, text_column, None)
         if isinstance(text, str) and text.strip():
             yield text
+
+
+def valueeval_text_iterator(
+    data_dir: Path,
+    splits: Sequence[str],
+    text_column: str,
+) -> Iterator[str]:
+    for split in splits:
+        path = data_dir / split
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Could not find {path}. Download the Touché23-ValueEval TSVs first."
+            )
+        with path.open("r", encoding="utf-8") as f:
+            reader = csv.DictReader(f, delimiter="\t")
+            if reader.fieldnames is None or text_column not in reader.fieldnames:
+                raise ValueError(
+                    f"Expected column '{text_column}' in {path}, found {reader.fieldnames}."
+                )
+            for row in reader:
+                text = (row.get(text_column) or "").strip()
+                if text:
+                    yield text
 
 
 def token_sequences_from_corpus(
@@ -316,6 +379,30 @@ def resolve_projection_module(model: torch.nn.Module, template: str, layer_index
     return current
 
 
+def determine_target_layers(
+    num_layers: int,
+    *,
+    layer_index: Optional[int],
+    layer_indices: Optional[Sequence[int]],
+    all_layers: bool,
+) -> List[int]:
+    if all_layers:
+        return list(range(num_layers))
+    if layer_indices:
+        unique = sorted(set(layer_indices))
+        for idx in unique:
+            if idx < 0 or idx >= num_layers:
+                raise ValueError(f"Layer index {idx} is outside [0, {num_layers}).")
+        return unique
+    if layer_index is not None:
+        if layer_index < 0 or layer_index >= num_layers:
+            raise ValueError(f"layer_index {layer_index} is outside [0, {num_layers}).")
+        return [layer_index]
+    raise ValueError(
+        "Specify --layer-index, --layer-indices, or --all-layers to choose which layers to capture."
+    )
+
+
 def determine_target_neurons(
     ff_dim: int, neuron_indices: Optional[Sequence[int]], all_neurons: bool
 ) -> List[int]:
@@ -357,6 +444,7 @@ def main() -> None:
     )
     if num_layers is None:
         raise ValueError("Could not infer the number of transformer layers for this model.")
+
     max_positions = (
         args.max_position_embeddings
         or getattr(model.config, "n_positions", None)
@@ -367,6 +455,13 @@ def main() -> None:
             f"sequence_length {args.sequence_length} exceeds the model limit ({max_positions})."
         )
 
+    target_layers = determine_target_layers(
+        num_layers,
+        layer_index=args.layer_index,
+        layer_indices=args.layer_indices,
+        all_layers=args.all_layers,
+    )
+
     template = args.mlp_projection_template or DEFAULT_PROJECTION_TEMPLATES.get(
         model.config.model_type
     )
@@ -375,16 +470,27 @@ def main() -> None:
             "Model type not recognized and no --mlp-projection-template provided. "
             "Specify a dotted path such as 'transformer.h[{layer}].mlp.c_proj'."
         )
-    projection_module = resolve_projection_module(model, template, args.layer_index)
-    hook = LayerActivationHook(projection_module)
+    hooks: dict[int, LayerActivationHook] = {}
+    for layer_idx in target_layers:
+        projection_module = resolve_projection_module(model, template, layer_idx)
+        hooks[layer_idx] = LayerActivationHook(projection_module)
 
-    dataset = load_dataset(
-        args.dataset,
-        args.dataset_config,
-        split=args.split,
-        streaming=args.streaming,
-    )
-    text_iter = dataset_text_iterator(dataset, args.text_column)
+    dataset_name = args.dataset.lower()
+    if dataset_name == "valueeval":
+        valueeval_dir = args.valueeval_dir.expanduser()
+        text_iter = valueeval_text_iterator(
+            valueeval_dir,
+            args.valueeval_splits,
+            args.valueeval_text_column,
+        )
+    else:
+        dataset = load_dataset(
+            args.dataset,
+            args.dataset_config,
+            split=args.split,
+            streaming=args.streaming,
+        )
+        text_iter = dataset_text_iterator(dataset, args.text_column)
     stride = args.stride or args.sequence_length
     max_sequences = args.max_sequences if args.max_sequences > 0 else None
     sequence_iter = token_sequences_from_corpus(
@@ -395,57 +501,76 @@ def main() -> None:
         max_sequences,
     )
 
-    aggregators: Dict[int, ActivationStats] = {}
-    ff_dim: Optional[int] = None
+    aggregators: Dict[int, Dict[int, ActivationStats]] = {}
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    progress = tqdm(total=max_sequences, desc="Collecting activations")
+    progress = tqdm(total=max_sequences, desc="Sequences")
+    layer_pbars = {
+        layer_idx: tqdm(
+            total=max_sequences if max_sequences is not None else None,
+            leave=False,
+            desc=f"Layer {layer_idx}",
+        )
+        for layer_idx in target_layers
+    }
     sequences_processed = 0
     for token_ids in sequence_iter:
         input_ids = torch.tensor(token_ids, dtype=torch.long, device=device).unsqueeze(0)
         sequences_processed += 1
         tokens_buffer = tokenizer.convert_ids_to_tokens(token_ids)
         model(input_ids=input_ids)
-        activations = hook.pop().to(torch.float32).squeeze(0)
-        if ff_dim is None:
-            ff_dim = activations.shape[-1]
-            target_indices = determine_target_neurons(
-                ff_dim, args.neuron_indices, args.all_neurons
-            )
-            aggregators = {
-                idx: ActivationStats(top_k=args.top_k, random_sample_size=args.random_sample_size)
-                for idx in target_indices
-            }
-        for neuron_idx, stats in aggregators.items():
-            neuron_activations = activations[:, neuron_idx].tolist()
-            stats.add(tokens_buffer, neuron_activations)
+        for layer_idx, hook in hooks.items():
+            activations = hook.pop().to(torch.float32).squeeze(0)
+            layer_stats = aggregators.get(layer_idx)
+            if layer_stats is None:
+                ff_dim = activations.shape[-1]
+                target_indices = determine_target_neurons(
+                    ff_dim, args.neuron_indices, args.all_neurons
+                )
+                layer_stats = {
+                    idx: ActivationStats(
+                        top_k=args.top_k, random_sample_size=args.random_sample_size
+                    )
+                    for idx in target_indices
+                }
+                aggregators[layer_idx] = layer_stats
+            for neuron_idx, stats in layer_stats.items():
+                neuron_activations = activations[:, neuron_idx].tolist()
+                stats.add(tokens_buffer, neuron_activations)
+            layer_pbars[layer_idx].update(1)
         progress.update(1)
     progress.close()
-    hook.remove()
+    for pbar in layer_pbars.values():
+        pbar.close()
+    for hook in hooks.values():
+        hook.remove()
 
     if not aggregators:
         raise RuntimeError("No sequences were processed; nothing to write.")
 
-    neurons_dir = output_dir / "neurons" / str(args.layer_index)
-    neurons_dir.mkdir(parents=True, exist_ok=True)
-    for neuron_idx, stats in aggregators.items():
-        neuron_record = NeuronRecord(
-            neuron_id=NeuronId(layer_index=args.layer_index, neuron_index=neuron_idx),
-            random_sample=stats.random_records(),
-            random_sample_by_quantile=None,
-            quantile_boundaries=None,
-            mean=stats.mean,
-            variance=stats.variance,
-            skewness=math.nan,
-            kurtosis=math.nan,
-            most_positive_activation_records=stats.top_records(),
-        )
-        output_path = neurons_dir / f"{neuron_idx}.json"
-        with output_path.open("wb") as f:
-            f.write(dumps(neuron_record))
+    neurons_base = output_dir / "neurons"
+    for layer_idx, neuron_map in aggregators.items():
+        neurons_dir = neurons_base / str(layer_idx)
+        neurons_dir.mkdir(parents=True, exist_ok=True)
+        for neuron_idx, stats in neuron_map.items():
+            neuron_record = NeuronRecord(
+                neuron_id=NeuronId(layer_index=layer_idx, neuron_index=neuron_idx),
+                random_sample=stats.random_records(),
+                random_sample_by_quantile=None,
+                quantile_boundaries=None,
+                mean=stats.mean,
+                variance=stats.variance,
+                skewness=math.nan,
+                kurtosis=math.nan,
+                most_positive_activation_records=stats.top_records(),
+            )
+            output_path = neurons_dir / f"{neuron_idx}.json"
+            with output_path.open("wb") as f:
+                f.write(dumps(neuron_record))
     print(
-        f"Wrote {len(aggregators)} neuron files to {neurons_dir}. "
+        f"Wrote {sum(len(x) for x in aggregators.values())} neuron files "
+        f"across {len(aggregators)} layer(s) to {neurons_base}. "
         f"Processed {sequences_processed} sequences."
     )
 
