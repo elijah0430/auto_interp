@@ -53,8 +53,14 @@ SHARD_COUNT=${SHARD_COUNT:-10}
 SHARD_PAD_WIDTH=${SHARD_PAD_WIDTH:-2}
 GPU_COUNT=${GPU_COUNT:-5}
 
+log() {
+  local ts
+  ts=$(date '+%Y-%m-%d %H:%M:%S')
+  echo "[$ts] $*"
+}
+
 if [ "$GPU_COUNT" -lt 1 ]; then
-  echo "GPU_COUNT must be >= 1 (received $GPU_COUNT)" >&2
+  log "GPU_COUNT must be >= 1 (received $GPU_COUNT)" >&2
   exit 1
 fi
 
