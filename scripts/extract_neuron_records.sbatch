@@ -49,6 +49,45 @@ NEURON_INDICES=${NEURON_INDICES:-"42 256"}
 VALUEEVAL_DIR=${VALUEEVAL_DIR:-$HOME/data/valueeval}
 VALUEEVAL_SPLITS=${VALUEEVAL_SPLITS:-"arguments-training.tsv arguments-validation.tsv arguments-validation-zhihu.tsv arguments-test.tsv arguments-test-nahjalbalagha.tsv"}
 VALUEEVAL_TEXT_COLUMN=${VALUEEVAL_TEXT_COLUMN:-Premise}
+EXPECTED_SEQUENCES=${EXPECTED_SEQUENCES:-}
+SHARD_COUNT=${SHARD_COUNT:-1}
+SHARD_INDEX=${SHARD_INDEX:-0}
+SHARD_PAD_WIDTH=${SHARD_PAD_WIDTH:-2}
+
+base_output_dir="$OUTPUT_DIR"
+
+if [ "$SHARD_COUNT" -gt 1 ]; then
+  if [ "$SHARD_INDEX" -lt 0 ] || [ "$SHARD_INDEX" -ge "$SHARD_COUNT" ]; then
+    echo "SHARD_INDEX ($SHARD_INDEX) must be within [0, SHARD_COUNT=$SHARD_COUNT)" >&2
+    exit 1
+  fi
+  shard_dir=$(printf "%s/shard_%0${SHARD_PAD_WIDTH}d" "$base_output_dir" "$SHARD_INDEX")
+  OUTPUT_DIR="$shard_dir"
+  DATASET_SPLIT=$(
+    python - "$DATASET_SPLIT" "$SHARD_INDEX" "$SHARD_COUNT" <<'PY'
+import sys
+base, shard_idx, shard_count = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+width = 100.0 / shard_count
+start = shard_idx * width
+end = (shard_idx + 1) * width
+def fmt(value, omit_zero=False, omit_hundred=False):
+    if omit_zero and abs(value) < 1e-9:
+        return ""
+    if omit_hundred and abs(value - 100.0) < 1e-9:
+        return ""
+    if abs(value - round(value)) < 1e-9:
+        return f"{int(round(value))}%"
+    return f"{value:.6f}%".rstrip("0").rstrip(".")
+start_token = fmt(start, omit_zero=True, omit_hundred=False)
+end_token = fmt(end, omit_zero=False, omit_hundred=(shard_idx == shard_count - 1))
+if start_token or end_token:
+    print(f"{base}[{start_token}:{end_token}]")
+else:
+    print(base)
+PY
+  )
+  echo "Shard ${SHARD_INDEX}/${SHARD_COUNT} -> split ${DATASET_SPLIT}, output ${OUTPUT_DIR}"
+fi
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -74,6 +113,9 @@ if [ "$DATASET_NAME" = "valueeval" ]; then
   read -r -a valueeval_split_array <<< "$VALUEEVAL_SPLITS"
   extra_flags+=(--valueeval-splits)
   extra_flags+=("${valueeval_split_array[@]}")
+fi
+if [ -n "$EXPECTED_SEQUENCES" ]; then
+  extra_flags+=(--expected-sequences "$EXPECTED_SEQUENCES")
 fi
 
 if [ "$ALL_NEURONS" = "1" ]; then

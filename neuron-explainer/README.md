@@ -41,6 +41,8 @@ Add `--all-layers` to sweep every transformer block in one run, or pass `--layer
 
 By default the CLI keeps the top 100 activation records per neuron (ordered strongest to weakest), which downstream tooling interprets in that same rank order.
 
+When you want to stream the entire dataset, set `--max-sequences 0`. In that scenario the loader has no natural denominator, so you can optionally pass `--expected-sequences <N>` to tell `tqdm` how many fixed-size windows to anticipate. Even without a denominator the progress bar now shows elapsed time and throughput (sequences/minute) so you can extrapolate progress for long-running jobs.
+
 ### Touché23-ValueEval corpus
 
 To use the dataset released with “Touché23-ValueEval: Identification of Human Values Behind Arguments”
@@ -71,3 +73,33 @@ VALUEEVAL_SPLITS="arguments-training.tsv arguments-validation.tsv",ALL_LAYERS=1,
    ```
 
 If you run on a Slurm cluster, `scripts/extract_neuron_records.sbatch` wraps the same command and exposes the key arguments via environment overrides (e.g. `sbatch --export=ALL,MODEL_ID=... scripts/extract_neuron_records.sbatch`). Set `ALL_LAYERS=1` or `LAYER_INDICES="0 1 2"` before submission to mirror the CLI options.
+
+### Sharding long jobs on Slurm
+
+Large corpora are easier to manage when you split them into non-overlapping slices and launch one job per slice. The helper below takes care of emitting sbatch commands with appropriate `DATASET_SPLIT` and `OUTPUT_DIR` overrides:
+
+```
+python scripts/launch_sharded_extraction.py \
+    --num-shards 4 \
+    --base-output-dir /scratch/$USER/auto_interp/output_openweb_sharded \
+    --sbatch-script scripts/extract_neuron_records.sbatch \
+    --env MODEL_ID=meta-llama/Llama-3.1-8B-Instruct \
+    --env DATASET_NAME=/scratch/$USER/datasets/openwebtext_local \
+    --env DATASET_CONFIG=default \
+    --env ALL_LAYERS=1 \
+    --env ALL_NEURONS=1 \
+    --env MAX_SEQUENCES=0
+```
+
+Each shard submits an sbatch job targeting `train[start%:end%]` and writes into `<base-output-dir>/shard_XX`. After the jobs finish, combine the results:
+
+```
+python scripts/merge_neuron_shards.py \
+    --output-dir /scratch/$USER/auto_interp/output_openweb_merged \
+    /scratch/$USER/auto_interp/output_openweb_sharded/shard_00 \
+    /scratch/$USER/auto_interp/output_openweb_sharded/shard_01 \
+    /scratch/$USER/auto_interp/output_openweb_sharded/shard_02 \
+    /scratch/$USER/auto_interp/output_openweb_sharded/shard_03
+```
+
+The merger reuses the extractor’s `ActivationStats` logic to keep top-k activations and random samples bounded while aggregating all shards into a single `neurons/<layer>/<neuron>.json` tree.

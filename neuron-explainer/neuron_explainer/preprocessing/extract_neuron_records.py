@@ -23,10 +23,11 @@ of the minimal `neuron_explainer` install_requires list.
 from __future__ import annotations
 
 import argparse
+import csv
 import heapq
 import math
 import random
-import csv
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence
@@ -132,6 +133,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1000,
         help="Maximum number of token sequences to score (<=0 means no limit, default: 1000).",
+    )
+    parser.add_argument(
+        "--expected-sequences",
+        type=int,
+        default=None,
+        help=(
+            "Optional expected number of sequences for progress reporting when --max-sequences <= 0. "
+            "Set to the total window count if you want tqdm to display a concrete denominator."
+        ),
     )
     parser.add_argument(
         "--layer-index",
@@ -509,7 +519,11 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    progress = tqdm(total=max_sequences, desc="Sequences")
+    expected_sequences = (
+        args.expected_sequences if args.expected_sequences and args.expected_sequences > 0 else None
+    )
+    progress_total = max_sequences if max_sequences is not None else expected_sequences
+    progress = tqdm(total=progress_total, desc="Sequences")
     layer_pbars = {
         layer_idx: tqdm(
             total=max_sequences if max_sequences is not None else None,
@@ -519,6 +533,7 @@ def main() -> None:
         for layer_idx in target_layers
     }
     sequences_processed = 0
+    start_time = time.time()
     for token_ids in sequence_iter:
         input_ids = torch.tensor(token_ids, dtype=torch.long, device=device).unsqueeze(0)
         sequences_processed += 1
@@ -544,6 +559,14 @@ def main() -> None:
                 stats.add(tokens_buffer, neuron_activations)
             layer_pbars[layer_idx].update(1)
         progress.update(1)
+        if sequences_processed % 25 == 0 or (progress.total is None and sequences_processed <= 5):
+            elapsed = max(time.time() - start_time, 1e-6)
+            seq_per_min = sequences_processed / elapsed * 60.0
+            progress.set_postfix(
+                processed=sequences_processed,
+                seq_per_min=f"{seq_per_min:.1f}",
+                elapsed=f"{elapsed/60.0:.1f}m",
+            )
     progress.close()
     for pbar in layer_pbars.values():
         pbar.close()
