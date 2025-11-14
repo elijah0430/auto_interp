@@ -357,9 +357,6 @@ def main() -> None:
     )
     if num_layers is None:
         raise ValueError("Could not infer the number of transformer layers for this model.")
-    if args.layer_index < 0 or args.layer_index >= num_layers:
-        raise ValueError(f"layer_index {args.layer_index} is outside [0, {num_layers}).")
-
     max_positions = (
         args.max_position_embeddings
         or getattr(model.config, "n_positions", None)

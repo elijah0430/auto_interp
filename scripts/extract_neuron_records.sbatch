@@ -24,6 +24,8 @@ DATASET_CONFIG=${DATASET_CONFIG:-}
 DATASET_SPLIT=${DATASET_SPLIT:-train}
 TEXT_COLUMN=${TEXT_COLUMN:-text}
 LAYER_INDEX=${LAYER_INDEX:-10}
+LAYER_INDICES=${LAYER_INDICES:-}
+ALL_LAYERS=${ALL_LAYERS:-0}
 SEQUENCE_LENGTH=${SEQUENCE_LENGTH:-128}
 STRIDE=${STRIDE:-$SEQUENCE_LENGTH}
 MAX_SEQUENCES=${MAX_SEQUENCES:-5000}
@@ -63,12 +65,21 @@ else
   neuron_flags=(--neuron-indices "${neuron_array[@]}")
 fi
 
+if [ "$ALL_LAYERS" = "1" ]; then
+  layer_flags=(--all-layers)
+elif [ -n "$LAYER_INDICES" ]; then
+  read -r -a layer_array <<< "$LAYER_INDICES"
+  layer_flags=(--layer-indices "${layer_array[@]}")
+else
+  layer_flags=(--layer-index "$LAYER_INDEX")
+fi
+
 srun python -m neuron_explainer.preprocessing.extract_neuron_records \
   --model "$MODEL_ID" \
   --dataset "$DATASET_NAME" \
   --split "$DATASET_SPLIT" \
   --text-column "$TEXT_COLUMN" \
-  --layer-index "$LAYER_INDEX" \
+  "${layer_flags[@]}" \
   --sequence-length "$SEQUENCE_LENGTH" \
   --max-sequences "$MAX_SEQUENCES" \
   --top-k "$TOP_K" \
