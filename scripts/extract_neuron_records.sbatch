@@ -5,9 +5,9 @@
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=10
+#SBATCH --ntasks-per-node=5
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:10
+#SBATCH --gres=gpu:5
 #SBATCH --time=24:00:00
 
 set -eo pipefail
@@ -23,7 +23,6 @@ if [ ! -f neuron-explainer/setup.py ]; then
   exit 1
 fi
 python -m pip install -e neuron-explainer >/dev/null
-
 
 MODEL_ID=${MODEL_ID:-meta-llama/Meta-Llama-3-8B-Instruct}
 TOKENIZER_ID=${TOKENIZER_ID:-$MODEL_ID}
@@ -52,7 +51,7 @@ VALUEEVAL_TEXT_COLUMN=${VALUEEVAL_TEXT_COLUMN:-Premise}
 EXPECTED_SEQUENCES=${EXPECTED_SEQUENCES:-}
 SHARD_COUNT=${SHARD_COUNT:-10}
 SHARD_PAD_WIDTH=${SHARD_PAD_WIDTH:-2}
-GPU_COUNT=${GPU_COUNT:-10}
+GPU_COUNT=${GPU_COUNT:-5}
 
 if [ "$GPU_COUNT" -lt 1 ]; then
   echo "GPU_COUNT must be >= 1 (received $GPU_COUNT)" >&2
