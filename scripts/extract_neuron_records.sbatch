@@ -147,55 +147,78 @@ mapfile -t SHARD_SPLITS < /tmp/split_ranges.txt
 rm -f /tmp/split_ranges.txt
 
 total_shards=${#SHARD_SPLITS[@]}
-shard_start=0
+next_shard=0
+completed_shards=0
+declare -a GPU_PIDS
+declare -a GPU_SHARD_IDS
+for ((slot=0; slot<GPU_COUNT; slot++)); do
+  GPU_PIDS[$slot]=""
+  GPU_SHARD_IDS[$slot]=""
+done
 
-while [ "$shard_start" -lt "$total_shards" ]; do
-  remaining=$((total_shards - shard_start))
-  if [ "$remaining" -lt "$GPU_COUNT" ]; then
-    batch_size=$remaining
-  else
-    batch_size=$GPU_COUNT
-  fi
-
-  declare -a batch_pids=()
-
-  for ((offset=0; offset<batch_size; offset++)); do
-    shard_idx=$((shard_start + offset))
-    shard_split="${SHARD_SPLITS[$shard_idx]}"
-    shard_output_dir=$(printf "%s/shard_%0${SHARD_PAD_WIDTH}d" "$BASE_OUTPUT_DIR" "$shard_idx")
-    mkdir -p "$shard_output_dir"
-    shard_extra_flags=("${extra_flags[@]}")
-    if [ -n "$EXPECTED_SEQUENCES" ]; then
-      per_shard=$((EXPECTED_SEQUENCES / SHARD_COUNT))
-      if [ "$shard_idx" -eq "$((SHARD_COUNT - 1))" ]; then
-        per_shard=$((EXPECTED_SEQUENCES - per_shard * (SHARD_COUNT - 1)))
-      fi
-      shard_extra_flags+=(--expected-sequences "$per_shard")
+launch_shard() {
+  local slot=$1
+  local shard_idx=$2
+  local shard_split="${SHARD_SPLITS[$shard_idx]}"
+  local shard_output_dir
+  shard_output_dir=$(printf "%s/shard_%0${SHARD_PAD_WIDTH}d" "$BASE_OUTPUT_DIR" "$shard_idx")
+  mkdir -p "$shard_output_dir"
+  local shard_extra_flags=("${extra_flags[@]}")
+  if [ -n "$EXPECTED_SEQUENCES" ]; then
+    local per_shard=$((EXPECTED_SEQUENCES / SHARD_COUNT))
+    if [ "$shard_idx" -eq "$((SHARD_COUNT - 1))" ]; then
+      per_shard=$((EXPECTED_SEQUENCES - per_shard * (SHARD_COUNT - 1)))
     fi
-    gpu_id="${ALLOCATED_GPU_IDS[$offset]}"
-    echo "==== Shard $((shard_idx + 1))/${SHARD_COUNT} | split ${shard_split} | output ${shard_output_dir} | GPU ${gpu_id} ===="
-    CUDA_VISIBLE_DEVICES="$gpu_id" srun --exclusive -N1 -n1 --gres=gpu:1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-4}" \
-      python -m neuron_explainer.preprocessing.extract_neuron_records \
-        --model "$MODEL_ID" \
-        --dataset "$DATASET_NAME" \
-        --split "$shard_split" \
-        --text-column "$TEXT_COLUMN" \
-        "${layer_flags[@]}" \
-        --sequence-length "$SEQUENCE_LENGTH" \
-        --max-sequences "$MAX_SEQUENCES" \
-        --top-k "$TOP_K" \
-        --random-sample-size "$RANDOM_SAMPLE_SIZE" \
-        --output-dir "$shard_output_dir" \
-        --device "$DEVICE" \
-        --dtype "$DTYPE" \
-        "${neuron_flags[@]}" \
-        "${shard_extra_flags[@]}" &
-    batch_pids+=($!)
+    shard_extra_flags+=(--expected-sequences "$per_shard")
+  fi
+  local gpu_id="${ALLOCATED_GPU_IDS[$slot]}"
+  echo "==== Shard $((shard_idx + 1))/${SHARD_COUNT} | split ${shard_split} | output ${shard_output_dir} | GPU ${gpu_id} ===="
+  (
+    CUDA_VISIBLE_DEVICES="$gpu_id" python -m neuron_explainer.preprocessing.extract_neuron_records \
+      --model "$MODEL_ID" \
+      --dataset "$DATASET_NAME" \
+      --split "$shard_split" \
+      --text-column "$TEXT_COLUMN" \
+      "${layer_flags[@]}" \
+      --sequence-length "$SEQUENCE_LENGTH" \
+      --max-sequences "$MAX_SEQUENCES" \
+      --top-k "$TOP_K" \
+      --random-sample-size "$RANDOM_SAMPLE_SIZE" \
+      --output-dir "$shard_output_dir" \
+      --device "$DEVICE" \
+      --dtype "$DTYPE" \
+      "${neuron_flags[@]}" \
+      "${shard_extra_flags[@]}"
+  ) &
+  local pid=$!
+  GPU_PIDS[$slot]=$pid
+  GPU_SHARD_IDS[$slot]=$shard_idx
+}
+
+while [ "$completed_shards" -lt "$total_shards" ]; do
+  for ((slot=0; slot<GPU_COUNT && next_shard<total_shards; slot++)); do
+    if [ -z "${GPU_PIDS[$slot]}" ]; then
+      launch_shard "$slot" "$next_shard"
+      next_shard=$((next_shard + 1))
+    fi
   done
 
-  for pid in "${batch_pids[@]}"; do
-    wait "$pid"
-  done
+  sleep 2
 
-  shard_start=$((shard_start + batch_size))
+  for ((slot=0; slot<GPU_COUNT; slot++)); do
+    pid="${GPU_PIDS[$slot]}"
+    if [ -n "$pid" ]; then
+      if ! kill -0 "$pid" 2>/dev/null; then
+        wait "$pid"
+        exit_code=$?
+        if [ "$exit_code" -ne 0 ]; then
+          echo "Shard ${GPU_SHARD_IDS[$slot]} failed with exit code $exit_code" >&2
+          exit "$exit_code"
+        fi
+        GPU_PIDS[$slot]=""
+        GPU_SHARD_IDS[$slot]=""
+        completed_shards=$((completed_shards + 1))
+      fi
+    fi
+  done
 done
