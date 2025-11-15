@@ -1,66 +1,60 @@
 #!/bin/bash
 #SBATCH -J neuron_extract
-#SBATCH -p amd_a100nv_8
+#SBATCH -p eme_h200nv_8
 #SBATCH --comment python
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=5
-#SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:5
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=1
+#SBATCH --gres=gpu:8
 #SBATCH --time=24:00:00
 
 set -eo pipefail
 
 module load intel/19.1.2 cuda/11.4
-module load python/3.7.1
+source ~/.bashrc
 export PS1=${PS1:-"(batch)"}
-source activate ${CONDA_ENV:-neuron-explainer}
-cd ${REPO_DIR:-$HOME/automated-interpretability}
-export PYTHONPATH=${PYTHONPATH:-${REPO_DIR:-$HOME/automated-interpretability}}
+conda activate ${CONDA_ENV:-notebook}
+cd ${REPO_DIR:-/scratch/x3069a10/auto_interp}
+export PYTHONPATH=${PYTHONPATH:-${REPO_DIR:-/scratch/x3069a10/auto_interp}}
 if [ ! -f neuron-explainer/setup.py ]; then
-  echo "Could not find neuron-explainer/setup.py in ${REPO_DIR:-$HOME/automated-interpretability}" >&2
+  echo "Could not find neuron-explainer/setup.py in ${REPO_DIR:-/scratch/x3069a10/auto_interp}" >&2
   exit 1
 fi
 python -m pip install -e neuron-explainer >/dev/null
 
-MODEL_ID=${MODEL_ID:-meta-llama/Llama-3.1-8B-Instruct}
-TOKENIZER_ID=${TOKENIZER_ID:-meta-llama/Llama-3.1-8B-Instruct}
-DATASET_NAME=${DATASET_NAME:-/scratch/x3069a10/datasets/openwebtext_local}
-DATASET_CONFIG=${DATASET_CONFIG:-default}
+MODEL_ID=${MODEL_ID:-meta-llama/Meta-Llama-3-8B-Instruct}
+TOKENIZER_ID=${TOKENIZER_ID:-$MODEL_ID}
+DATASET_NAME=${DATASET_NAME:-openwebtext}
+DATASET_CONFIG=${DATASET_CONFIG:-}
 DATASET_SPLIT=${DATASET_SPLIT:-train}
 TEXT_COLUMN=${TEXT_COLUMN:-text}
 LAYER_INDEX=${LAYER_INDEX:-10}
-LAYER_INDICES=${LAYER_INDICES:-"0 1 2 3 4 5 6 7 8 9 10 11 12 13 14"}
+LAYER_INDICES=${LAYER_INDICES:-}
 ALL_LAYERS=${ALL_LAYERS:-0}
 SEQUENCE_LENGTH=${SEQUENCE_LENGTH:-128}
 STRIDE=${STRIDE:-$SEQUENCE_LENGTH}
-MAX_SEQUENCES=${MAX_SEQUENCES:-0}
+MAX_SEQUENCES=${MAX_SEQUENCES:-5000}
 TOP_K=${TOP_K:-100}
 RANDOM_SAMPLE_SIZE=${RANDOM_SAMPLE_SIZE:-50}
-OUTPUT_DIR=${OUTPUT_DIR:-/scratch/x3069a10/auto_interp/output_openweb}
+OUTPUT_DIR=${OUTPUT_DIR:-$PWD/output_neuron_records}
 DEVICE=${DEVICE:-cuda}
 DTYPE=${DTYPE:-float16}
 TRUST_REMOTE_CODE=${TRUST_REMOTE_CODE:-0}
 STREAMING=${STREAMING:-0}
-ALL_NEURONS=${ALL_NEURONS:-1}
-NEURON_INDICES=${NEURON_INDICES:-}
+ALL_NEURONS=${ALL_NEURONS:-0}
+NEURON_INDICES=${NEURON_INDICES:-"42 256"}
 VALUEEVAL_DIR=${VALUEEVAL_DIR:-$HOME/data/valueeval}
 VALUEEVAL_SPLITS=${VALUEEVAL_SPLITS:-"arguments-training.tsv arguments-validation.tsv arguments-validation-zhihu.tsv arguments-test.tsv arguments-test-nahjalbalagha.tsv"}
 VALUEEVAL_TEXT_COLUMN=${VALUEEVAL_TEXT_COLUMN:-Premise}
 EXPECTED_SEQUENCES=${EXPECTED_SEQUENCES:-}
-SHARD_COUNT=${SHARD_COUNT:-10}
+SHARD_COUNT=${SHARD_COUNT:-8}
 SHARD_PAD_WIDTH=${SHARD_PAD_WIDTH:-2}
-GPU_COUNT=${GPU_COUNT:-5}
-
-log() {
-  local ts
-  ts=$(date '+%Y-%m-%d %H:%M:%S')
-  echo "[$ts] $*"
-}
+GPU_COUNT=${GPU_COUNT:-8}
 
 if [ "$GPU_COUNT" -lt 1 ]; then
-  log "GPU_COUNT must be >= 1 (received $GPU_COUNT)" >&2
+  echo "GPU_COUNT must be >= 1 (received $GPU_COUNT)" >&2
   exit 1
 fi
 
@@ -129,102 +123,95 @@ fi
 
 python - "$DATASET_SPLIT" "$SHARD_COUNT" <<'PY' > /tmp/split_ranges.txt
 import sys
-base = sys.argv[1]
+
+spec = sys.argv[1]
 count = int(sys.argv[2])
-width = 100.0 / count
-def fmt(v, omit_zero=False, omit_hundred=False):
-    if omit_zero and abs(v) < 1e-9:
-        return ""
-    if omit_hundred and abs(v - 100.0) < 1e-9:
-        return ""
-    if abs(v - round(v)) < 1e-9:
-        return f"{int(round(v))}%"
-    return f"{v:.6f}%".rstrip("0").rstrip(".")
+
+def parse_spec(base_spec: str):
+    if "[" not in base_spec:
+        return base_spec, 0.0, 100.0
+    base, _, bracket = base_spec.partition("[")
+    bracket = bracket.rstrip("]")
+    start_token, _, end_token = bracket.partition(":")
+    def to_percent(token: str, default: float) -> float:
+        if not token:
+            return default
+        token = token.rstrip("%")
+        return float(token)
+    return base, to_percent(start_token, 0.0), to_percent(end_token, 100.0)
+
+def fmt(value: float) -> str:
+    if abs(value - round(value)) < 1e-9:
+        return f"{int(round(value))}%"
+    return f"{value:.6f}%".rstrip("0").rstrip(".")
+
+base_name, base_start, base_end = parse_spec(spec)
+total_width = base_end - base_start
+width = total_width / count
+
+splits = []
 for idx in range(count):
-    start = idx * width
-    end = (idx + 1) * width
-    start_token = fmt(start, omit_zero=True, omit_hundred=False)
-    end_token = fmt(end, omit_zero=False, omit_hundred=(idx == count - 1))
-    split = f"{base}[{start_token}:{end_token}]" if (start_token or end_token) else base
-    print(split)
+    start = base_start + idx * width
+    end = base_start + (idx + 1) * width
+    end = min(end, base_end)
+    splits.append(f"{base_name}[{fmt(start)}:{fmt(end)}]")
+
+print("\\n".join(splits))
 PY
 
 mapfile -t SHARD_SPLITS < /tmp/split_ranges.txt
 rm -f /tmp/split_ranges.txt
 
 total_shards=${#SHARD_SPLITS[@]}
-next_shard=0
-completed_shards=0
-declare -a GPU_PIDS
-declare -a GPU_SHARD_IDS
-for ((slot=0; slot<GPU_COUNT; slot++)); do
-  GPU_PIDS[$slot]=""
-  GPU_SHARD_IDS[$slot]=""
-done
+shard_start=0
 
-launch_shard() {
-  local slot=$1
-  local shard_idx=$2
-  local shard_split="${SHARD_SPLITS[$shard_idx]}"
-  local shard_output_dir
-  shard_output_dir=$(printf "%s/shard_%0${SHARD_PAD_WIDTH}d" "$BASE_OUTPUT_DIR" "$shard_idx")
-  mkdir -p "$shard_output_dir"
-  local shard_extra_flags=("${extra_flags[@]}")
-  if [ -n "$EXPECTED_SEQUENCES" ]; then
-    local per_shard=$((EXPECTED_SEQUENCES / SHARD_COUNT))
-    if [ "$shard_idx" -eq "$((SHARD_COUNT - 1))" ]; then
-      per_shard=$((EXPECTED_SEQUENCES - per_shard * (SHARD_COUNT - 1)))
-    fi
-    shard_extra_flags+=(--expected-sequences "$per_shard")
+while [ "$shard_start" -lt "$total_shards" ]; do
+  remaining=$((total_shards - shard_start))
+  if [ "$remaining" -lt "$GPU_COUNT" ]; then
+    batch_size=$remaining
+  else
+    batch_size=$GPU_COUNT
   fi
-  local gpu_id="${ALLOCATED_GPU_IDS[$slot]}"
-  echo "==== Shard $((shard_idx + 1))/${SHARD_COUNT} | split ${shard_split} | output ${shard_output_dir} | GPU ${gpu_id} ===="
-  (
-    CUDA_VISIBLE_DEVICES="$gpu_id" python -m neuron_explainer.preprocessing.extract_neuron_records \
-      --model "$MODEL_ID" \
-      --dataset "$DATASET_NAME" \
-      --split "$shard_split" \
-      --text-column "$TEXT_COLUMN" \
-      "${layer_flags[@]}" \
-      --sequence-length "$SEQUENCE_LENGTH" \
-      --max-sequences "$MAX_SEQUENCES" \
-      --top-k "$TOP_K" \
-      --random-sample-size "$RANDOM_SAMPLE_SIZE" \
-      --output-dir "$shard_output_dir" \
-      --device "$DEVICE" \
-      --dtype "$DTYPE" \
-      "${neuron_flags[@]}" \
-      "${shard_extra_flags[@]}"
-  ) &
-  local pid=$!
-  GPU_PIDS[$slot]=$pid
-  GPU_SHARD_IDS[$slot]=$shard_idx
-}
 
-while [ "$completed_shards" -lt "$total_shards" ]; do
-  for ((slot=0; slot<GPU_COUNT && next_shard<total_shards; slot++)); do
-    if [ -z "${GPU_PIDS[$slot]}" ]; then
-      launch_shard "$slot" "$next_shard"
-      next_shard=$((next_shard + 1))
-    fi
-  done
+  declare -a batch_pids=()
 
-  sleep 2
-
-  for ((slot=0; slot<GPU_COUNT; slot++)); do
-    pid="${GPU_PIDS[$slot]}"
-    if [ -n "$pid" ]; then
-      if ! kill -0 "$pid" 2>/dev/null; then
-        wait "$pid"
-        exit_code=$?
-        if [ "$exit_code" -ne 0 ]; then
-          echo "Shard ${GPU_SHARD_IDS[$slot]} failed with exit code $exit_code" >&2
-          exit "$exit_code"
-        fi
-        GPU_PIDS[$slot]=""
-        GPU_SHARD_IDS[$slot]=""
-        completed_shards=$((completed_shards + 1))
+  for ((offset=0; offset<batch_size; offset++)); do
+    shard_idx=$((shard_start + offset))
+    shard_split="${SHARD_SPLITS[$shard_idx]}"
+    shard_output_dir=$(printf "%s/shard_%0${SHARD_PAD_WIDTH}d" "$BASE_OUTPUT_DIR" "$shard_idx")
+    mkdir -p "$shard_output_dir"
+    shard_extra_flags=("${extra_flags[@]}")
+    if [ -n "$EXPECTED_SEQUENCES" ]; then
+      per_shard=$((EXPECTED_SEQUENCES / SHARD_COUNT))
+      if [ "$shard_idx" -eq "$((SHARD_COUNT - 1))" ]; then
+        per_shard=$((EXPECTED_SEQUENCES - per_shard * (SHARD_COUNT - 1)))
       fi
+      shard_extra_flags+=(--expected-sequences "$per_shard")
     fi
+    gpu_id="${ALLOCATED_GPU_IDS[$offset]}"
+    echo "==== Shard $((shard_idx + 1))/${SHARD_COUNT} | split ${shard_split} | output ${shard_output_dir} | GPU ${gpu_id} ===="
+    CUDA_VISIBLE_DEVICES="$gpu_id" srun --exclusive -N1 -n1 --gres=gpu:1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-4}" \
+      python -m neuron_explainer.preprocessing.extract_neuron_records \
+        --model "$MODEL_ID" \
+        --dataset "$DATASET_NAME" \
+        --split "$shard_split" \
+        --text-column "$TEXT_COLUMN" \
+        "${layer_flags[@]}" \
+        --sequence-length "$SEQUENCE_LENGTH" \
+        --max-sequences "$MAX_SEQUENCES" \
+        --top-k "$TOP_K" \
+        --random-sample-size "$RANDOM_SAMPLE_SIZE" \
+        --output-dir "$shard_output_dir" \
+        --device "$DEVICE" \
+        --dtype "$DTYPE" \
+        "${neuron_flags[@]}" \
+        "${shard_extra_flags[@]}" &
+    batch_pids+=($!)
   done
+
+  for pid in "${batch_pids[@]}"; do
+    wait "$pid"
+  done
+
+  shard_start=$((shard_start + batch_size))
 done
