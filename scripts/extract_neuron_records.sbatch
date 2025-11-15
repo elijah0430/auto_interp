@@ -24,27 +24,27 @@ if [ ! -f neuron-explainer/setup.py ]; then
 fi
 python -m pip install -e neuron-explainer >/dev/null
 
-MODEL_ID=${MODEL_ID:-meta-llama/Meta-Llama-3-8B-Instruct}
-TOKENIZER_ID=${TOKENIZER_ID:-$MODEL_ID}
-DATASET_NAME=${DATASET_NAME:-openwebtext}
-DATASET_CONFIG=${DATASET_CONFIG:-}
+MODEL_ID=${MODEL_ID:-meta-llama/Llama-3.1-8B-Instruct}
+TOKENIZER_ID=${TOKENIZER_ID:-meta-llama/Llama-3.1-8B-Instruct}
+DATASET_NAME=${DATASET_NAME:-/scratch/x3069a10/datasets/openwebtext_local}
+DATASET_CONFIG=${DATASET_CONFIG:-default}
 DATASET_SPLIT=${DATASET_SPLIT:-train}
 TEXT_COLUMN=${TEXT_COLUMN:-text}
 LAYER_INDEX=${LAYER_INDEX:-10}
-LAYER_INDICES=${LAYER_INDICES:-}
+LAYER_INDICES=${LAYER_INDICES:-"0 1 2 3 4 5 6 7 8 9 10 11 12 13 14"}
 ALL_LAYERS=${ALL_LAYERS:-0}
 SEQUENCE_LENGTH=${SEQUENCE_LENGTH:-128}
 STRIDE=${STRIDE:-$SEQUENCE_LENGTH}
-MAX_SEQUENCES=${MAX_SEQUENCES:-5000}
+MAX_SEQUENCES=${MAX_SEQUENCES:-0}
 TOP_K=${TOP_K:-100}
 RANDOM_SAMPLE_SIZE=${RANDOM_SAMPLE_SIZE:-50}
-OUTPUT_DIR=${OUTPUT_DIR:-$PWD/output_neuron_records}
+OUTPUT_DIR=${OUTPUT_DIR:-/scratch/x3069a10/auto_interp/output_openweb}
 DEVICE=${DEVICE:-cuda}
 DTYPE=${DTYPE:-float16}
 TRUST_REMOTE_CODE=${TRUST_REMOTE_CODE:-0}
 STREAMING=${STREAMING:-0}
-ALL_NEURONS=${ALL_NEURONS:-0}
-NEURON_INDICES=${NEURON_INDICES:-"42 256"}
+ALL_NEURONS=${ALL_NEURONS:-1}
+NEURON_INDICES=${NEURON_INDICES:-}
 VALUEEVAL_DIR=${VALUEEVAL_DIR:-$HOME/data/valueeval}
 VALUEEVAL_SPLITS=${VALUEEVAL_SPLITS:-"arguments-training.tsv arguments-validation.tsv arguments-validation-zhihu.tsv arguments-test.tsv arguments-test-nahjalbalagha.tsv"}
 VALUEEVAL_TEXT_COLUMN=${VALUEEVAL_TEXT_COLUMN:-Premise}
