@@ -30,7 +30,7 @@ import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Sequence
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import torch
 from datasets import load_dataset
@@ -242,6 +242,31 @@ def parse_args() -> argparse.Namespace:
         help="Use the slow tokenizer implementation.",
     )
     return parser.parse_args()
+
+
+def _parse_count_based_split(spec: str) -> Optional[Tuple[str, int, Optional[int]]]:
+    """Returns (base_split, start, end) for count-based split specs like 'train[100:200]'."""
+
+    if "[" not in spec or not spec.endswith("]"):
+        return None
+    base, _, bracket = spec.partition("[")
+    bracket = bracket[:-1]  # drop trailing ]
+    start_token, _, end_token = bracket.partition(":")
+
+    def parse_token(token: str, default: Optional[int]) -> Optional[int]:
+        token = token.strip()
+        if not token:
+            return default
+        if token.endswith("%"):
+            return None
+        return int(float(token))
+
+    start_value = parse_token(start_token, 0)
+    end_value = parse_token(end_token, None)
+
+    if start_value is None or (end_token.strip().endswith("%") if end_token else False):
+        return None
+    return base, start_value, end_value
 
 
 def dataset_text_iterator(dataset, text_column: str) -> Iterator[str]:
@@ -527,12 +552,28 @@ def main() -> None:
             args.valueeval_text_column,
         )
     else:
+        count_split = _parse_count_based_split(args.split)
+        dataset_split = count_split[0] if count_split else args.split
         dataset = load_dataset(
             args.dataset,
             args.dataset_config,
-            split=args.split,
+            split=dataset_split,
             streaming=args.streaming,
         )
+        if count_split is not None:
+            if args.streaming:
+                raise ValueError(
+                    "Count-based split ranges (train[start:end]) are not supported when streaming."
+                )
+            _, start_idx, end_idx = count_split
+            total = len(dataset)
+            start_idx = max(0, min(start_idx or 0, total))
+            end_limit = total if end_idx is None else end_idx
+            end_idx = max(0, min(end_limit, total))
+            if start_idx >= end_idx:
+                dataset = dataset.select([])
+            else:
+                dataset = dataset.select(range(start_idx, end_idx))
         text_iter = dataset_text_iterator(dataset, args.text_column)
     stride = args.stride or args.sequence_length
     max_sequences = args.max_sequences if args.max_sequences > 0 else None

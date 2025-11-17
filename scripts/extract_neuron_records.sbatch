@@ -121,42 +121,75 @@ else
   layer_flags=(--layer-index "$LAYER_INDEX")
 fi
 
-python - "$DATASET_SPLIT" "$SHARD_COUNT" <<'PY' > /tmp/split_ranges.txt
+python - "$DATASET_SPLIT" "$SHARD_COUNT" "$MAX_SEQUENCES" <<'PY' > /tmp/split_ranges.txt
 import sys
 
 spec = sys.argv[1]
 count = int(sys.argv[2])
+max_sequences = float(sys.argv[3]) if len(sys.argv) > 3 else 0.0
 
 def parse_spec(base_spec: str):
     if "[" not in base_spec:
-        return base_spec, 0.0, 100.0
+        if max_sequences > 0:
+            return base_spec, 0.0, max_sequences, "count"
+        return base_spec, 0.0, 100.0, "percent"
     base, _, bracket = base_spec.partition("[")
     bracket = bracket.rstrip("]")
     start_token, _, end_token = bracket.partition(":")
-    def to_percent(token: str, default: float) -> float:
-        if not token:
-            return default
-        token = token.rstrip("%")
-        return float(token)
-    return base, to_percent(start_token, 0.0), to_percent(end_token, 100.0)
 
-def fmt(value: float) -> str:
+    def parse_token(token: str, default_value: float, default_unit: str):
+        if not token:
+            return default_value, default_unit
+        if token.endswith("%"):
+            return float(token.rstrip("%")), "percent"
+        return float(token), "count"
+
+    start_value, start_unit = parse_token(start_token, 0.0, "percent")
+    end_default = 100.0 if start_unit == "percent" else start_value
+    end_value, end_unit = parse_token(end_token, end_default, start_unit)
+
+    unit = end_unit or start_unit or "percent"
+    if unit == "percent":
+        if start_unit not in (None, "percent") or end_unit not in (None, "percent"):
+            raise ValueError(f"Mixed percent/count spec not supported: {base_spec}")
+    else:
+        if start_unit == "percent" or end_unit == "percent":
+            raise ValueError(f"Mixed percent/count spec not supported: {base_spec}")
+    return base, start_value, end_value, unit
+
+def fmt_percent(value: float) -> str:
     if abs(value - round(value)) < 1e-9:
         return f"{int(round(value))}%"
-    return f"{value:.6f}%".rstrip("0").rstrip(".")
+    trimmed = f"{value:.6f}".rstrip("0").rstrip(".")
+    return f"{trimmed}%"
 
-base_name, base_start, base_end = parse_spec(spec)
+base_name, base_start, base_end, unit = parse_spec(spec)
 total_width = base_end - base_start
-width = total_width / count
 
 splits = []
-for idx in range(count):
-    start = base_start + idx * width
-    end = base_start + (idx + 1) * width
-    end = min(end, base_end)
-    splits.append(f"{base_name}[{fmt(start)}:{fmt(end)}]")
+if unit == "percent":
+    width = total_width / count
+    for idx in range(count):
+        start = base_start + idx * width
+        end = base_start + (idx + 1) * width
+        end = min(end, base_end)
+        splits.append(f"{base_name}[{fmt_percent(start)}:{fmt_percent(end)}]")
+else:
+    base_start = int(round(base_start))
+    base_end = int(round(base_end))
+    total_width = base_end - base_start
+    if total_width < count:
+        raise ValueError("Absolute range smaller than number of shards.")
+    chunk = total_width // count
+    remainder = total_width % count
+    current = base_start
+    for idx in range(count):
+        extra = 1 if idx < remainder else 0
+        end = current + chunk + extra
+        splits.append(f"{base_name}[{current}:{end}]")
+        current = end
 
-print("\\n".join(splits))
+print("\n".join(splits))
 PY
 
 mapfile -t SHARD_SPLITS < /tmp/split_ranges.txt
