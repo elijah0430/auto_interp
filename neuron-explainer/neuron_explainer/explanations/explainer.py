@@ -29,6 +29,9 @@ from neuron_explainer.explanations.token_space_few_shot_examples import (
 logger = logging.getLogger(__name__)
 
 
+EXPLAINER_MODEL_NAME = "gpt-4.1-2025-04-14"
+SIMULATOR_MODEL_NAME = "gpt-4.1-mini-2025-04-14"
+
 # TODO(williamrs): This prefix may not work well for some things, like predicting the next token.
 # Try other options like "this neuron activates for".
 EXPLANATION_PREFIX = "the main thing this neuron does is find"
@@ -62,7 +65,13 @@ class ContextSize(int, Enum):
         raise ValueError(f"{i} is not a valid ContextSize")
 
 
-HARMONY_V4_MODELS = ["gpt-3.5-turbo", "gpt-4", "gpt-4-1106-preview"]
+HARMONY_V4_MODELS = [
+    "gpt-3.5-turbo",
+    "gpt-4",
+    "gpt-4-1106-preview",
+    EXPLAINER_MODEL_NAME,
+    SIMULATOR_MODEL_NAME,
+]
 
 
 class NeuronExplainer(ABC):
