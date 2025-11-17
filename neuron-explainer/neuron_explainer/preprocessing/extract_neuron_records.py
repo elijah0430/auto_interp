@@ -573,7 +573,7 @@ def main() -> None:
             if start_idx >= end_idx:
                 dataset = dataset.select([])
             else:
-                dataset = dataset.select(range(start_idx, end_idx))
+                dataset = dataset.select(list(range(start_idx, end_idx)))
         text_iter = dataset_text_iterator(dataset, args.text_column)
     stride = args.stride or args.sequence_length
     max_sequences = args.max_sequences if args.max_sequences > 0 else None
